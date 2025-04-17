@@ -2,12 +2,20 @@ import SwiftUI
 import CoreMotion
 import CoreImage.CIFilterBuiltins
 import UIKit
+import MultipeerConnectivity
 
 // MARK: - 共有履歴データモデル
 struct ShareLog: Codable, Identifiable {
     let id = UUID()
     let date: Date
     let method: String // "QR" or "AirDrop"
+}
+
+// MARK: - バッジ送信Payload
+struct OutgoingPayload: Codable {
+    let uuid: String
+    let profileURL: String
+    let badges: [Badge]
 }
 
 // MARK: - 履歴管理ViewModel
@@ -46,21 +54,71 @@ class ShareLogViewModel: ObservableObject {
 }
 
 // MARK: - メインビュー
+
+// 🔽 NEW: シートの種類を定義
+enum ActiveSheet: Identifiable {
+    case settings, friendsList, nickname
+    case badgeHistory
+
+    var id: Int {
+        switch self {
+        case .settings: return 0
+        case .friendsList: return 1
+        case .nickname: return 2
+        case .badgeHistory: return 3
+        }
+    }
+}
+
 struct ContentView: View {
     let motionManager = CMMotionManager()
 
     @State private var isSharing = false
     @State private var showQR = false
     @State private var didShake = false
-    
-    @AppStorage("userProfileURL") private var profileURL: String = ""
     @State private var isSettingURL = false
     @State private var tempURL: String = ""
     @State private var showMenu = false
     @State private var isLoading = true
+    @State private var showMessage = false
+    @State private var messageText = ""
+    @State private var showReadyMessage = false
+    @State private var countdown = 5
+    @State private var countdownTimer: Timer? = nil
+    @State private var nicknameInput = ""
+    @State private var newNickname: String = ""
+    @State private var pendingUUID: String = ""
+    @State private var pendingProfileURL: String? = nil
+    @State private var selectedBadgeTargetUUID: String? = nil
+    @State private var selectedBadges: [Badge] = [] // ✅ 選ばれたバッジ
+    @State private var receivedBadges: [Badge] = []
+    @State private var showBadgeReceivedSheet = false
 
+
+    
+    @State private var activeSheet: ActiveSheet? = nil
+
+    @AppStorage("userProfileURL") private var profileURL: String = ""
+    @AppStorage("userUUID") private var userUUID: String = UUID().uuidString
+    @AppStorage("countdownDuration") private var countdownDuration: Int = 5
 
     @StateObject private var logVM = ShareLogViewModel()
+    @StateObject private var multipeerManager = MultipeerManager()
+    @StateObject private var friendManager = FriendManager()
+    @StateObject private var badgeManager = BadgeManager()
+    // MARK: - 自分のバッジ取得
+    func getMyBadges() -> [Badge] {
+        // 一時的に "GentleMan" バッジを自分のバッジとして返す（実際にはユーザー設定に応じて管理する）
+        return [Badge(id: UUID(), name: "GentleMan", description: "礼儀正しく、丁寧な印象", imageName: "GentleManBadge")]
+    }
+
+    func showTemporaryMessage(_ text: String) {
+        messageText = text
+        showMessage = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            showMessage = false
+        }
+    }
 
     var body: some View {
         ZStack(alignment: .leading) {
@@ -68,7 +126,7 @@ struct ContentView: View {
                 LinearGradient(gradient: Gradient(colors: [.pink.opacity(0.3), .blue.opacity(0.2)]),
                            startPoint: .topLeading,
                            endPoint: .bottomTrailing)
-                .ignoresSafeArea()
+                
                 if isLoading {
                     VStack {
                         Spacer()
@@ -88,7 +146,8 @@ struct ContentView: View {
                             }) {
                                 Image(systemName: "line.horizontal.3")
                                     .foregroundColor(.white)
-                                    .padding()
+                                    .padding(.top, 60)         // ← ✅ 上部余白を明示的に確保
+                                    .padding(.leading, 16)     // ← ✅ 左の余白だけ指定（必要に応じて）
                             }
                             Spacer()
                         }
@@ -136,10 +195,55 @@ struct ContentView: View {
             }
             
         }
+        .ignoresSafeArea(.all)
+        .onReceive(multipeerManager.$receivedData.compactMap { $0 }) { (data:Data) in
+
+            struct ReceivedPayload: Codable {
+                let uuid: String
+                let profileURL: String
+                let badges: [Badge]
+            }
+
+            if let decoded = try? JSONDecoder().decode(ReceivedPayload.self, from: data) {
+                let receivedID = decoded.uuid
+                let receivedURL = decoded.profileURL
+                let receivedBadges = decoded.badges
+
+                print("🛰️ 受信したUUID: \(receivedID)")
+                print("🌐 受信したURL: \(receivedURL)")
+                print("🎖️ 受信したバッジ数: \(receivedBadges.count)")
+
+                if friendManager.hasFriend(uuid: receivedID) {
+                    // ✅ すでに存在 → 情報更新
+                    friendManager.updateProfileURL(for: receivedID, newURL: receivedURL)
+                    friendManager.appendBadges(for: receivedID, newBadges: receivedBadges)
+                    let name = friendManager.getNickname(for: receivedID) ?? "Unknown"
+                    showTemporaryMessage("🔄 \(name) さんの情報を更新しました")
+                    if !receivedBadges.isEmpty {
+                        self.receivedBadges = receivedBadges
+                        self.showBadgeReceivedSheet = true
+                    }
+
+
+                } else {
+                    // ✅ 新しい友達として登録フローへ
+                    pendingUUID = receivedID
+                    pendingProfileURL = receivedURL
+                    friendManager.storeTemporaryBadges(badges: receivedBadges) // ✅ 次項を参照
+                    activeSheet = .nickname
+                }
+            }
+        }
+
+
         .onAppear {
             print("🌟 onAppear start")
             isLoading = true
-
+            
+            if UserDefaults.standard.string(forKey: "userUUID") == nil {
+                    UserDefaults.standard.set(userUUID, forKey: "userUUID")
+                }
+            
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 print("🛠 check & shake start")
                 checkInitialURL()
@@ -186,6 +290,95 @@ struct ContentView: View {
             }
             .padding()
         }
+        .sheet(item: $activeSheet) { item in
+            switch item {
+            case .settings:
+                SettingsView()
+            case .friendsList:
+                FriendsListView(friendManager: friendManager)
+            case .nickname:
+                nicknameInputView()
+            case .badgeHistory:
+                BadgeHistoryView(badges: friendManager.getAllBadges())
+            }
+
+        }
+        .sheet(isPresented: Binding<Bool>(
+            get: { selectedBadgeTargetUUID != nil },
+            set: { if !$0 { selectedBadgeTargetUUID = nil } }
+        )) {
+            if let uuid = selectedBadgeTargetUUID {
+                BadgePickerView(
+                    badges: badgeManager.allBadges,
+                    onBadgeSelected: { badge in
+                        badgeManager.assignBadge(badge, to: uuid, in: friendManager)
+                    },
+                    targetUUID: uuid,
+                    onSelectionConfirmed: { selected in
+                        for badge in selected {
+                            badgeManager.assignBadge(badge, to: uuid, in: friendManager)
+                        }
+                    },
+                    onSendBadges: { selected in
+                        let payload = OutgoingPayload(
+                            uuid: userUUID,
+                            profileURL: profileURL,
+                            badges: selected
+                        )
+                        if let data = try? JSONEncoder().encode(payload) {
+                            multipeerManager.send(data: data)
+                            showTemporaryMessage("🎁 バッジ送信完了: \(selected.map { $0.name }.joined(separator: ", "))")
+                        }
+                        selectedBadgeTargetUUID = nil
+                    },
+                    friendManager: friendManager
+                )
+            }
+        }
+
+
+        .overlay(
+            Group {
+                if showMessage {
+                    Text(messageText)
+                        .padding()
+                        .background(Color.white)
+                        .foregroundColor(.black)
+                        .cornerRadius(10)
+                        .shadow(radius: 5)
+                        .transition(.opacity)
+                }
+            },
+            alignment: .center
+        )
+        .sheet(isPresented: $showBadgeReceivedSheet) {
+            VStack(spacing: 20) {
+                Text("🎖️ バッジを受信しました！")
+                    .font(.headline)
+                
+                ForEach(receivedBadges) { badge in
+                    HStack {
+                        Image(badge.imageName)
+                            .resizable()
+                            .frame(width: 40, height: 40)
+                        VStack(alignment: .leading) {
+                            Text(badge.name)
+                                .font(.subheadline)
+                            Text(badge.description)
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                        }
+                    }
+                }
+
+                Button("閉じる") {
+                    showBadgeReceivedSheet = false
+                }
+                .padding(.top, 20)
+            }
+            .padding()
+        }
+
 
     }
 
@@ -202,7 +395,10 @@ struct ContentView: View {
                 handleShake()
             }
         }
+
+        showTemporaryMessage("🚀 シェイクの準備完了！")
     }
+
 
 
     func isShake(_ acceleration: CMAcceleration) -> Bool {
@@ -212,12 +408,73 @@ struct ContentView: View {
                abs(acceleration.z) > threshold
     }
     
-    
-
+    /// iPhoneを振ったときに呼ばれる処理
     func handleShake() {
+        guard !didShake else { return }
         didShake = true
-        motionManager.stopAccelerometerUpdates()
+
+        let payload = OutgoingPayload(
+            uuid: userUUID,
+            profileURL: profileURL,
+            badges: selectedBadges
+        )
+
+        if let data = try? JSONEncoder().encode(payload) {
+            multipeerManager.send(data: data)
+            print("🚀 バッジ送信: \(selectedBadges.map { $0.name })")
+            if !selectedBadges.isEmpty {
+                showTemporaryMessage("🎁 バッジ送信完了: \(selectedBadges.map { $0.name }.joined(separator: ", "))")
+            }
+        }
+        // 1. 自分のUUID送信はそのまま残す
+        if let data = userUUID.data(using: .utf8) {
+            multipeerManager.send(data: data)
+        }
+
+        // 2. 相手に送りたいバッジ情報（例：GentleManバッジ）を送信
+        let badge = Badge(id: UUID(), name: "GentleMan", description: "礼儀正しく、丁寧な印象", imageName: "GentleManBadge") // ← 自分で定義してるバッジ定数がある場合
+        let badgePayload = BadgePayload(type: .badge, from: userUUID, to: selectedBadgeTargetUUID ?? "", badge: badge)
+
+        if let badgeData = try? JSONEncoder().encode(badgePayload) {
+            multipeerManager.send(data: badgeData)
+        }
+
+        selectedBadges = [] // 送信後にリセット
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + Double(countdownDuration)) {
+            didShake = false
+        }
+        // 🔁 接続相手のUUIDを使ってバッジ送信対象に設定（selfは使わない！）
+        if let targetUUID = multipeerManager.lastReceivedID {
+            selectedBadgeTargetUUID = targetUUID
+            print("🎯 バッジ送信対象: \(targetUUID)")
+        } else {
+            print("⚠️ 接続相手のUUIDが取得できませんでした")
+        }
+
+        
     }
+
+    func sendBadge(_ badge: Badge) {
+        guard !pendingUUID.isEmpty else { return }
+
+        let payload = BadgePayload(type: .badge, from: userUUID, to: pendingUUID, badge: badge)
+        if let data = try? JSONEncoder().encode(payload) {
+            multipeerManager.send(data: data)
+            friendManager.appendBadges(for: pendingUUID, newBadges: [badge])  // 自分側にも履歴残す
+            showTemporaryMessage("🎉 \(badge.name) を送りました！")
+            pendingUUID = ""
+        }
+    }
+    
+    func handleReceivedBadge(from: String, badge: Badge) {
+        // 受信者側で保存
+        friendManager.appendBadges(for: from, newBadges: [badge])
+        showTemporaryMessage("🎖️ \(badge.name) バッジを \(from.prefix(6)) から受信しました！")
+        receivedBadges = [badge]
+        showBadgeReceivedSheet = true
+    }
+
 
     func showQRCode() {
         guard !profileURL.isEmpty else {
@@ -236,7 +493,10 @@ struct ContentView: View {
 
     func returnToOptions() {
         showQR = false
+        didShake = false
+        startShakeDetection() // ← ここで毎回呼ぶ
     }
+
 
     func generateQRCode(from string: String) -> UIImage {
         guard !string.isEmpty else {
@@ -264,6 +524,43 @@ struct ContentView: View {
             isSettingURL = true
         }
     }
+    
+    func nicknameInputView() -> some View {
+        VStack(spacing: 16) {
+            Text("ニックネームを入力してください")
+                .font(.headline)
+
+            TextField("例: ユウスケ", text: $nicknameInput)
+                .textFieldStyle(RoundedBorderTextFieldStyle())
+                .padding()
+
+            Button("保存") {
+                if !pendingUUID.isEmpty {
+                    // 同じニックネームがすでに使われていないかチェック
+                    if friendManager.friends.contains(where: { $0.nickname == nicknameInput }) {
+                        showTemporaryMessage("⚠️ 同じニックネームがすでに存在します！")
+                    } else {
+                        // 🔽 プロフィールURLも一緒に保存！
+                        friendManager.addFriend(uuid: pendingUUID, nickname: nicknameInput, profileURL: pendingProfileURL)
+                        showTemporaryMessage("🌟 \(nicknameInput) さんを登録しました！")
+                        nicknameInput = ""
+                        pendingUUID = ""
+                        pendingProfileURL = nil // ← リセットを忘れずに
+                        activeSheet = nil
+                    }
+                }
+            }
+
+
+            Button("キャンセル", role: .cancel) {
+                nicknameInput = ""
+                pendingUUID = ""
+                activeSheet = nil
+            }
+        }
+        .padding()
+    }
+
 
     func renderQRCodeView() -> some View {
         VStack(spacing: 16) {
@@ -283,6 +580,8 @@ struct ContentView: View {
 
             Button(action: {
                 withAnimation {
+                    didShake = false
+                    startShakeDetection()
                     returnToOptions()
                 }
             }) {
@@ -299,6 +598,12 @@ struct ContentView: View {
 
     func renderShareOptionsView() -> some View {
         VStack(spacing: 16) {
+            Text("⏳ あと \(countdown) 秒で戻ります！")
+                .foregroundColor(.white)
+                .onAppear {
+                    startCountdown()
+                }
+
             Button(action: {
                 withAnimation(.easeInOut(duration: 0.3)) {
                     showQRCode()
@@ -310,8 +615,6 @@ struct ContentView: View {
                     .foregroundColor(.pink)
                     .cornerRadius(12)
             }
-            .transition(.scale)
-            .animation(.easeInOut, value: showQR)
 
             Button(action: {
                 withAnimation(.easeInOut(duration: 0.3)) {
@@ -324,10 +627,37 @@ struct ContentView: View {
                     .foregroundColor(.blue)
                     .cornerRadius(12)
             }
-            .transition(.scale)
-            .animation(.easeInOut, value: isSharing)
+
+            Button(action: {
+                withAnimation {
+                    countdownTimer?.invalidate() // タイマーを止める
+                    didShake = false
+                    startShakeDetection()
+                }
+            }) {
+                Text("🔙 戻る")
+                    .padding()
+                    .background(Color.orange.opacity(0.2))
+                    .cornerRadius(10)
+            }
         }
     }
+
+
+    func startCountdown() {
+        countdown = countdownDuration
+        countdownTimer?.invalidate()
+        countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { timer in
+            if countdown > 0 {
+                countdown -= 1
+            } else {
+                timer.invalidate()
+                didShake = false
+                startShakeDetection()
+            }
+        }
+    }
+
 
 
     func renderShakePrompt() -> some View {
@@ -390,7 +720,7 @@ struct ContentView: View {
                     showMenu = false
                 }
             }
-            .padding(.top, 60)
+            .padding(.top, 100) // ← 今より20pxくらい下にずれる
 
             Button("❌ 閉じる") {
                 withAnimation {
@@ -398,6 +728,27 @@ struct ContentView: View {
                 }
             }
             .foregroundColor(.red)
+            
+            Button("⚙️ 設定") {
+                activeSheet = .settings // ✅ 先に表示フラグを立てる
+                DispatchQueue.main.async {
+                    showMenu = false // ✅ 次のランループで閉じる
+                }
+            }
+            Button("👥 ともだちリスト") {
+                activeSheet = .friendsList
+                DispatchQueue.main.async {
+                    showMenu = false
+                }
+            }
+            Button("🎖️ バッジ履歴") {
+                activeSheet = .badgeHistory
+                DispatchQueue.main.async {
+                    showMenu = false
+                }
+            }
+
+
 
             Spacer()
         }
@@ -406,9 +757,7 @@ struct ContentView: View {
         .background(Color.black.opacity(0.9))
         .edgesIgnoringSafeArea(.all)
     }
-
-
-
+        
     func formatted(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy/MM/dd HH:mm"
