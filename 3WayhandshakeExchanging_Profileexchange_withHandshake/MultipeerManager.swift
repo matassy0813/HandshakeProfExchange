@@ -119,5 +119,12 @@ extension MultipeerManager: MCNearbyServiceBrowserDelegate {
     func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) {
         print("❌ ブラウズ開始失敗: \(error.localizedDescription)")
     }
+    
+    func sendImage(_ image: UIImage) {
+        if let imageData = image.jpegData(compressionQuality: 0.8) {
+            send(data: imageData)
+        }
+    }
+
 }
 

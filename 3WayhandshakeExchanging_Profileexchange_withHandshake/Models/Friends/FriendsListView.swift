@@ -9,7 +9,8 @@ import SwiftUI
 
 struct FriendsListView: View {
     @ObservedObject var friendManager: FriendManager
-    @Environment(\.dismiss) private var dismiss  // ✅ これを追加
+    @Environment(\.dismiss) private var dismiss  
+    @StateObject var albumManager = AlbumManager()
 
     var body: some View {
         NavigationView {
@@ -27,6 +28,11 @@ struct FriendsListView: View {
                         NavigationLink(destination: EditNicknameView(friend: friend, manager: friendManager)) {
                             Text("編集")
                         }
+                        NavigationLink(destination: AlbumView(albumManager: albumManager, senderUUID: friend.uuid)) {
+                            Text("アルバムを見る 📷")
+                                .foregroundColor(.blue)
+                        }
+
                     }
                 }
                 .onDelete(perform: deleteFriends)

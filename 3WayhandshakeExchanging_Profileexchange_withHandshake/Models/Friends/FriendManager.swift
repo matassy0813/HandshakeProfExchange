@@ -9,6 +9,10 @@ import SwiftUI
 
 class FriendManager: ObservableObject {
     @Published var friends: [Friend] = []
+    // アルバム遷移用プロパティ
+    @Published var showFriendAlbum: Bool = false
+    @Published var selectedFriendForAlbum: Friend? = nil
+    
     private let key = "friends_list"
     
     private var pendingBadges: [Badge] = []

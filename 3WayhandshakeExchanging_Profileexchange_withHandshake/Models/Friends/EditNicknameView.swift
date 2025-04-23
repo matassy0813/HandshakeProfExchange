@@ -60,7 +60,15 @@ struct EditNicknameView: View {
                 manager.removeFriend(uuid: friend.uuid)
                 presentationMode.wrappedValue.dismiss()
             }
-            
+            // 友達とのアルバムを見るボタン
+            Button("📸 アルバムを見る") {
+                manager.selectedFriendForAlbum = friend
+                manager.showFriendAlbum = true
+            }
+            .padding()
+            .background(Color.green.opacity(0.2))
+            .cornerRadius(10)
+
             .padding()
             
             if let urlString = friend.profileURL, let url = URL(string: urlString) {
