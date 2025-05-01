@@ -7,6 +7,7 @@
 
 import SwiftUI
 import Foundation
+import MultipeerConnectivity
 
 // MARK: - バッジ管理
 class BadgeManager: ObservableObject {
@@ -26,4 +27,33 @@ class BadgeManager: ObservableObject {
             assignBadge(badge, to: friendUUID, in: friendManager)
         }
     }
+
+    // バッジを友達に送信する（バッジ付与＋Multipeer通信）
+    func sendBadge(
+        _ badge: Badge,
+        to friendUUID: String,
+        from userUUID: String,
+        friendManager: FriendManager,
+        multipeerManager: MultipeerManager
+    ) {
+        // 1. ローカルで友達にバッジを付与
+        assignBadge(badge, to: friendUUID, in: friendManager)
+        // 2. Multipeer通信で相手にバッジ情報を送信
+        let payload = BadgePayload(type: .badge, from: userUUID, to: friendUUID, badge: badge)
+        if let data = try? JSONEncoder().encode(payload) {
+            multipeerManager.send(data: data)
+        }
+        print("\(badge.name) バッジを \(friendUUID) に送信しました（ローカル付与＋通信）")
+    }
 }
+
+struct BadgePayload: Codable {
+    enum PayloadType: String, Codable {
+        case uuid, badge
+    }
+    let type: PayloadType
+    let from: String
+    let to: String
+    let badge: Badge
+}
+

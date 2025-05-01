@@ -10,19 +10,18 @@ import AVFoundation
 
 struct CameraView: View {
     @ObservedObject var cameraManager: CameraManager
-    var onCapture: (UIImage) -> Void
+    var onCapture: (UIImage, UIImage) -> Void
     var onCancel: () -> Void
     
-    @State private var previewImage: UIImage? = nil
+    @State private var frontImage: UIImage? = nil
+    @State private var backImage: UIImage? = nil
     @State private var showPreview = false
 
     var body: some View {
         ZStack {
-            cameraPreview()              // 🔵 カメラプレビュー
+            CameraPreviewView(session: cameraManager.session)
             topOverlay()                 // 🔵 上部情報表示
             bottomOverlay()              // 🔵 シャッターと戻る
-            CameraPreviewView(session: cameraManager.session)
-                        .edgesIgnoringSafeArea(.all)
         }
         .edgesIgnoringSafeArea(.all)
         .onAppear {
@@ -31,52 +30,19 @@ struct CameraView: View {
         .onDisappear {
             cameraManager.stopSession()
         }
-        
-        if showPreview, let image = previewImage {
-            VStack {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxHeight: 300)
-                    .cornerRadius(12)
-                    .padding()
-
-                Text("🌟 最高のメンツ！")
-                    .font(.title2)
-                    .bold()
-                    .padding(.bottom)
-
-                Button("戻る") {
-                    showPreview = false
-                    onCancel()
-                }
-                .padding()
-                .background(Color.blue.opacity(0.2))
-                .cornerRadius(8)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color.black.opacity(0.7))
-            .edgesIgnoringSafeArea(.all)
-        }
-
-    }
-
-    // MARK: - カメラプレビュー
-    private func cameraPreview() -> some View {
-        GeometryReader { geometry in
-            CameraPreviewView(session: cameraManager.session)
-                .frame(width: geometry.size.width, height: geometry.size.height)
-                .clipped()
-        }
     }
 
     // MARK: - 上部オーバーレイ
     private func topOverlay() -> some View {
         VStack {
-            Text("📸 2分以内に撮影してください！")
-                .font(.headline)
-                .foregroundColor(.white)
-                .padding(.top, 60)
+            HStack {
+                Text("📸 2分以内に撮影してください！")
+                    .font(.headline)
+                    .foregroundColor(.white)
+                Spacer()
+                switchCameraButton()
+            }
+            .padding([.top, .horizontal], 20)
             Spacer()
         }
     }
@@ -95,48 +61,12 @@ struct CameraView: View {
 
     // MARK: - シャッターボタン
     private func captureButton() -> some View {
-        Button(action: {
-            // 撮影時は、まだ送信せずプレビューだけ表示
-            cameraManager.capturePhoto { image in
-                previewImage = image
-                showPreview = true
-            }
-        }) {
-            Image(systemName: "camera.circle.fill")
-                .resizable()
-                .frame(width: 70, height: 70)
-                .foregroundColor(.white)
-        }
-        // プレビュー用fullScreenCover
-        .fullScreenCover(isPresented: $showPreview) {
-            if let image = previewImage {
-                VStack {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    Text("最高のメンツ！")
-                        .font(.title)
-                        .padding()
-                    HStack {
-                        // ★★ ここで初めてonCaptureを呼び出して送信！
-                        Button("送信") {
-                            onCapture(image)
-                            showPreview = false
-                        }
-                        .padding()
-                        Button("撮り直し") {
-                            previewImage = nil
-                            showPreview = false
-                        }
-                        .padding()
-                    }
-                }
-                .background(Color.black)
-            }
+        Button(action: captureBeRealPhoto) {
+            Circle().frame(width: 80, height: 80).foregroundColor(.white)
+                .overlay(Circle().stroke(Color.blue, lineWidth: 4))
         }
     }
-
+    
     // MARK: - キャンセルボタン
     private func cancelButton() -> some View {
         Button(action: onCancel) {
@@ -158,5 +88,81 @@ struct CameraView: View {
                 .foregroundColor(.white)
         }
     }
+    // --- 関数分離 ---
+    // MARK: - BeReal風の2枚撮影ロジック
+    private func captureBeRealPhoto() {
+        
+        let startPosition = cameraManager.currentCameraPosition
+        cameraManager.switchCamera(to: startPosition) {
+            cameraManager.capturePhoto { firstImage in
+                if startPosition == .back {
+                    self.backImage = firstImage
+                } else {
+                    self.frontImage = firstImage
+                }
 
+                // 3秒後に反対側
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    let nextPosition: AVCaptureDevice.Position = (startPosition == .back) ? .front : .back
+                    cameraManager.switchCamera(to: nextPosition) {
+                        cameraManager.capturePhoto { secondImage in
+                            if startPosition == .back {
+                                self.frontImage = secondImage
+                            } else {
+                                self.backImage = secondImage
+                            }
+                            if let front = frontImage, let back = backImage {
+                                onCapture(front, back)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    private func clearImages() {
+        self.frontImage = nil
+        self.backImage = nil
+    }
+}
+
+struct PhotoPreviewView: View {
+    var frontImage: UIImage?
+    var backImage: UIImage?
+    var onSend: () -> Void
+    var onRetry: () -> Void
+
+    var body: some View {
+        VStack {
+            HStack {
+                if let front = frontImage {
+                    Image(uiImage: front)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 140, height: 140)
+                        .cornerRadius(12)
+                }
+                if let back = backImage {
+                    Image(uiImage: back)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 140, height: 140)
+                        .cornerRadius(12)
+                }
+            }
+            Text("撮影した写真を確認")
+                .font(.headline)
+                .padding()
+            HStack {
+                Button("送信") { onSend() }
+                    .padding()
+                Button("撮り直し📷") { onRetry() }
+                    .padding()
+            }
+        }
+        .padding()
+        .background(Color.black.opacity(0.8))
+        .cornerRadius(16)
+    }
 }

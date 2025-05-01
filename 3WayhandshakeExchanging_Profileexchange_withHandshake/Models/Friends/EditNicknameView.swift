@@ -9,26 +9,57 @@ import SwiftUI
 import SafariServices
 
 struct EditNicknameView: View {
-    let friend: Friend
     @ObservedObject var manager: FriendManager
     @Environment(\.presentationMode) var presentationMode
+    @StateObject private var albumManager = AlbumManager()
+    @State private var showAlbum = false
 
     @State private var newName: String = ""
     @State private var showSafari = false
+    
+    let uuid: String
+    let profileURL: String?
+    var badges: [Badge] {
+        manager.getMyBadges()
+    }
+
+
+    var onShowAlbum: (Friend) -> Void
 
     var body: some View {
         VStack(spacing: 20) {
             Text("ニックネームを編集")
-                .font(.title2)
+                .font(.largeTitle)
+                .bold()
+                .padding(.top, 40)
+            
+            TextField("ニックネームを入力", text: $newName)
+                .onAppear {
+                    self.newName = manager.getNickname(for: uuid) ?? ""
+                }
 
-            TextField("新しいニックネーム", text: $newName)
                 .textFieldStyle(RoundedBorderTextFieldStyle())
                 .padding()
 
             Button("保存") {
-                manager.updateNickname(for: friend.uuid, newNickname: newName)
+                guard !newName.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+                
+                if manager.hasFriend(uuid: uuid) {
+                    manager.updateNickname(for: uuid, newNickname: newName)
+                    if let profileURL = profileURL {
+                        manager.updateProfileURL(for: uuid, newURL: profileURL)
+                    }
+                } else {
+                    manager.registerFriend(uuid: uuid, nickname: newName, profileURL: profileURL)
+                }
+
+                if let friend = manager.getFriend(by: uuid) {
+                    onShowAlbum(friend)
+                }
+
                 presentationMode.wrappedValue.dismiss()
             }
+
             .padding()
             .background(Color.blue.opacity(0.2))
             .cornerRadius(10)
@@ -36,7 +67,7 @@ struct EditNicknameView: View {
             Divider()
 
             // ✅ URLがある場合のみボタンを表示
-            if let url = friend.profileURL, !url.isEmpty {
+            if let url = profileURL, !url.isEmpty {
                 Text("プロフィールURL:")
                     .font(.subheadline)
                 Text(url)
@@ -57,13 +88,13 @@ struct EditNicknameView: View {
 
             // 🔴 ここに削除ボタンを追加
             Button("この友だちを削除", role: .destructive) {
-                manager.removeFriend(uuid: friend.uuid)
+                manager.removeFriend(uuid: uuid)
                 presentationMode.wrappedValue.dismiss()
             }
+            
             // 友達とのアルバムを見るボタン
             Button("📸 アルバムを見る") {
-                manager.selectedFriendForAlbum = friend
-                manager.showFriendAlbum = true
+                showAlbum = true
             }
             .padding()
             .background(Color.green.opacity(0.2))
@@ -71,20 +102,22 @@ struct EditNicknameView: View {
 
             .padding()
             
-            if let urlString = friend.profileURL, let url = URL(string: urlString) {
+            if let urlString = profileURL, let url = URL(string: urlString) {
                 Button("🌐 プロフィールURLを開く") {
                     UIApplication.shared.open(url)
                 }
                 .padding(.top, 8)
             }
+            
             // 🔽 ここにバッジ表示を追加
-            if !friend.badges.isEmpty {
+
+            if !badges.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("付与されたバッジ")
                         .font(.headline)
                         .padding(.top)
 
-                    ForEach(friend.badges) { badge in
+                    ForEach(badges) { badge in
                         HStack {
                             Image(badge.imageName)
                                 .resizable()
@@ -101,14 +134,11 @@ struct EditNicknameView: View {
                 .padding(.top, 16)
             }
 
-            
-            
         }
         .padding()
-        .onAppear {
-            newName = friend.nickname
+        .fullScreenCover(isPresented: $showAlbum) {
+            AlbumView(albumManager: albumManager, senderUUID: uuid, nickname: newName)
         }
-        
     }
 }
 

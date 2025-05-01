@@ -19,13 +19,3 @@ enum PayloadType: String, Codable {
     case badge
 }
 
-struct BadgePayload: Codable {
-    enum PayloadType: String, Codable {
-        case uuid, badge
-    }
-
-    let type: PayloadType
-    let from: String
-    let to: String
-    let badge: Badge
-}

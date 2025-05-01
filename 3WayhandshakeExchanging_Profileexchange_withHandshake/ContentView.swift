@@ -3,30 +3,7 @@ import CoreMotion
 import CoreImage.CIFilterBuiltins
 import UIKit
 import MultipeerConnectivity
-
-// MARK: - 共有履歴データモデル
-struct ShareLog: Codable, Identifiable {
-    let id = UUID()
-    let date: Date
-    let method: String // "QR" or "AirDrop"
-}
-
-// MARK: - バッジ送信Payload
-struct OutgoingPayload: Codable {
-    let uuid: String
-    let profileURL: String
-    let badges: [Badge]
-}
-
-// ContentView.swift の上部（ContentView構造体の外）に追加
-struct PhotoPayload: Codable {
-    let type: String  // "photo"
-    let from: String
-    let to: String
-    let imageData: Data
-    let message: String
-}
-
+import Foundation
 
 // MARK: - 履歴管理ViewModel
 class ShareLogViewModel: ObservableObject {
@@ -115,8 +92,16 @@ struct ContentView: View {
     @State private var receivedPhoto: UIImage? = nil
     @State private var showPhotoReceivedSheet: Bool = false
     @State private var receivedPhotoMessage: String? = nil
-    @State private var showPreview = false         // 写真プレビュー画面の表示フラグ
-
+    @State private var showPreview = false
+    @State private var frontImage: UIImage? = nil
+    @State private var backImage: UIImage? = nil
+    @State private var showBeRealPreview = false
+    @State private var showCameraPrompt = false
+    @State private var cameraPromptFriendName = ""
+    
+    @State private var selectedFriendForAlbum: Friend? = nil
+    @State private var isAlbumPresented: Bool = false
+    @State private var isAlbumViewVisible = false
     
     @State private var activeSheet: ActiveSheet? = nil
 
@@ -131,6 +116,21 @@ struct ContentView: View {
     @StateObject private var cameraManager = CameraManager()
     @StateObject private var albumManager = AlbumManager()
 
+
+    @State private var showPhotoPrompt = false
+    @State private var photoPromptFriend: Friend? = nil
+    @State private var cameraTargetFriend: Friend? = nil
+    @State private var showPhotoPreview = false
+    @State private var previewFrontImage: UIImage? = nil
+    @State private var previewBackImage: UIImage? = nil
+    @State private var showBadgePicker = false
+    @State private var badgeTargetFriend: Friend? = nil
+    @State private var badgeToSend: Badge? = nil
+    @State private var showBadgeConfirm = false
+    @State private var showBadgeReceivedPopup = false
+    @State private var badgeReceivedFrom: String? = nil
+    @State private var badgeReceived: Badge? = nil
+    
     // MARK: - 自分のバッジ取得
     func getMyBadges() -> [Badge] {
         // 一時的に "GentleMan" バッジを自分のバッジとして返す（実際にはユーザー設定に応じて管理する）
@@ -144,7 +144,7 @@ struct ContentView: View {
             showMessage = false
         }
     }
-
+    
     var body: some View {
         ZStack(alignment: .leading) {
             ZStack {
@@ -239,46 +239,81 @@ struct ContentView: View {
                 print("🎖️ 受信したバッジ数: \(receivedBadges.count)")
 
                 if friendManager.hasFriend(uuid: receivedID) {
-                    // ✅ すでに存在 → 情報更新
                     friendManager.updateProfileURL(for: receivedID, newURL: receivedURL)
                     friendManager.appendBadges(for: receivedID, newBadges: receivedBadges)
-                    let name = friendManager.getNickname(for: receivedID) ?? "Unknown"
-                    showTemporaryMessage("🔄 \(name) さんの情報を更新しました")
-                    if !receivedBadges.isEmpty {
-                        self.receivedBadges = receivedBadges
-                        self.showBadgeReceivedSheet = true
+                    if let name = friendManager.getNickname(for: receivedID) {
+                        showTemporaryMessage("🎉 \(name) さんと通信しました！")
+
+                        // ✅ バイブ追加
+                        let generator = UINotificationFeedbackGenerator()
+                        generator.notificationOccurred(.success)
                     }
-
-
                 } else {
-                    // ✅ 新しい友達として登録フローへ
+                    // 新規ならニックネーム登録へ
                     pendingUUID = receivedID
                     pendingProfileURL = receivedURL
-                    friendManager.storeTemporaryBadges(badges: receivedBadges) // ✅ 次項を参照
+                    friendManager.storeTemporaryBadges(badges: receivedBadges)
                     activeSheet = .nickname
                 }
                 
+                // 受信時の処理
+                // onReceive(multipeerManager.$receivedData.compactMap { $0 }) { data in ... }
                 if let photoPayload = try? JSONDecoder().decode(PhotoPayload.self, from: data),
-                       photoPayload.type == "photo",
-                       let uiImage = UIImage(data: photoPayload.imageData) {
-                        // 相手からの写真はfriendページ用アルバムに保存
-                        albumManager.addPhoto(uiImage, from: photoPayload.from, message: photoPayload.message)
-                        self.receivedPhoto = uiImage
-                        self.receivedPhotoMessage = photoPayload.message
-                        self.showPhotoReceivedSheet = true
-                        showTemporaryMessage("📥 \(photoPayload.message)")
+                       photoPayload.type == "photo" {
+                        if let front = UIImage(data: photoPayload.frontImage),
+                           let back = UIImage(data: photoPayload.backImage) {
+                            albumManager.addPhoto(front, from: photoPayload.from, message: "受信:自撮り")
+                            albumManager.addPhoto(back, from: photoPayload.from, message: "受信:外カメ")
+                            //　成功バイブ
+                            let generator = UINotificationFeedbackGenerator()
+                            generator.notificationOccurred(.success)
+                            
+                            // ここでプレビューUIやメッセージも出す
+                            self.receivedPhoto = front // 片方だけプレビューするなら
+                            self.receivedPhotoMessage = photoPayload.message
+                            self.showPhotoReceivedSheet = true
+                        }
+                    }
+            }
+            print("📥 データ受信！解析開始")
+
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let type = json["type"] as? String {
+                switch type {
+                case "profile":
+                    print("✅ プロフィール受信")
+                    let uuid = json["uuid"] as? String ?? ""
+                    multipeerManager.lastReceivedID = uuid
+                    pendingUUID = uuid
+                    pendingProfileURL = json["profileURL"] as? String
+                    if !friendManager.hasFriend(uuid: uuid) {
+                        activeSheet = .nickname
+                    }
+                case "badge":
+                    print("🎖️ バッジ受信")
+                    // バッジ処理
+                default:
+                    print("❓ 未知データ受信")
                 }
+            } else {
+                print("❌ データ解析失敗")
             }
         }
-
-
         .onAppear {
             print("🌟 onAppear start")
             isLoading = true
+            multipeerManager.albumManager = albumManager
             
             if UserDefaults.standard.string(forKey: "userUUID") == nil {
-                    UserDefaults.standard.set(userUUID, forKey: "userUUID")
-                }
+                UserDefaults.standard.set(userUUID, forKey: "userUUID")
+            } else {
+                userUUID = UserDefaults.standard.string(forKey: "userUUID")!
+            }
+            
+            // ✅ ここを追加！！
+            multipeerManager.userUUID = userUUID
+            multipeerManager.userProfileURL = profileURL
+            print("🛠 MultipeerManagerにuserUUIDを設定: \(userUUID)")
             
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 print("🛠 check & shake start")
@@ -332,91 +367,117 @@ struct ContentView: View {
                 SettingsView()
             case .friendsList:
                 FriendsListView(friendManager: friendManager)
+                    .environmentObject(albumManager)
             case .nickname:
-                nicknameInputView()
+                EditNicknameView(
+                    manager: friendManager,
+                    uuid: pendingUUID,
+                    profileURL: pendingProfileURL,
+                    onShowAlbum: { friend in
+                        selectedFriendForAlbum = friend
+                        isAlbumViewVisible = true
+                    }
+                )
             case .badgeHistory:
                 BadgeHistoryView(badges: friendManager.getAllBadges())
             case .calendarAlbum:
                 AlbumCalendarView(albumManager: albumManager)
-
             }
-
         }
-        .sheet(isPresented: Binding<Bool>(
-            get: { selectedBadgeTargetUUID != nil },
-            set: { if !$0 { selectedBadgeTargetUUID = nil } }
-        )) {
-            if let uuid = selectedBadgeTargetUUID {
+        .sheet(isPresented: $showBadgePicker) {
+            if let friend = badgeTargetFriend {
                 BadgePickerView(
                     badges: badgeManager.allBadges,
                     onBadgeSelected: { badge in
-                        badgeManager.assignBadge(badge, to: uuid, in: friendManager)
+                        confirmBadgeSend(badge: badge, to: friend)
                     },
-                    targetUUID: uuid,
+                    targetUUID: friend.uuid,
                     onSelectionConfirmed: { selected in
                         for badge in selected {
-                            badgeManager.assignBadge(badge, to: uuid, in: friendManager)
+                            confirmBadgeSend(badge: badge, to: friend)
                         }
                     },
                     onSendBadges: { selected in
-                        let payload = OutgoingPayload(
-                            uuid: userUUID,
-                            profileURL: profileURL,
-                            badges: selected
-                        )
-                        if let data = try? JSONEncoder().encode(payload) {
-                            multipeerManager.send(data: data)
-                            showTemporaryMessage("🎁 バッジ送信完了: \(selected.map { $0.name }.joined(separator: ", "))")
+                        for badge in selected {
+                            badgeManager.sendBadge(
+                                badge,
+                                to: friend.uuid,
+                                from: userUUID,
+                                friendManager: friendManager,
+                                multipeerManager: multipeerManager
+                            )
                         }
-                        selectedBadgeTargetUUID = nil
+                        showBadgePicker = false
                     },
                     friendManager: friendManager
                 )
             }
         }
         .sheet(isPresented: $isCameraPresented) {
-            CameraView(cameraManager: cameraManager, onCapture: { image in
-                showCapturedImagePreview(image: image)  // プレビュー表示
+            CameraView(cameraManager: cameraManager, onCapture: { front, back in
+                previewFrontImage = front
+                previewBackImage = back
+                showPhotoPreview = true
                 isCameraPresented = false
             }, onCancel: {
                 isCameraPresented = false
             })
         }
+        .sheet(isPresented: $showPhotoPreview) {
+            PhotoPreviewView(
+                frontImage: previewFrontImage,
+                backImage: previewBackImage,
+                onSend: {
+                    if let friend = cameraTargetFriend, let front = previewFrontImage, let back = previewBackImage {
+                        cameraManager.sendPhoto(front: front, back: back, to: friend.uuid, multipeerManager: multipeerManager)
+                        if let myUUID = UserDefaults.standard.string(forKey: "userUUID") {
+                            albumManager.addPhoto(front, from: myUUID, message: "自撮り")
+                            albumManager.addPhoto(back, from: myUUID, message: "外カメ")
+                        }
+                        
+                        presentBadgePicker(for: friend.uuid)
+                        
+                        let generator = UINotificationFeedbackGenerator()
+                        generator.notificationOccurred(.success)
 
-        // プレビューと送信確認のfullScreenCover
-        .fullScreenCover(isPresented: $showPreview) {
-            if let image = capturedImage {
-                VStack {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    Text("最高のメンツ！")
-                        .font(.title)
-                        .padding()
-                    HStack {
-                        Button("送信") {
-                            // 送信ロジック
-                            if let imageData = image.jpegData(compressionQuality: 0.8),
-                               let targetUUID = multipeerManager.lastReceivedID {
-                                let photoPayload = PhotoPayload(type: "photo", from: userUUID, to: targetUUID, imageData: imageData, message: "最高の思い出！")
-                                if let encoded = try? JSONEncoder().encode(photoPayload) {
-                                    multipeerManager.send(data: encoded)
-                                    albumManager.addPhoto(image, from: userUUID, message: "自分の写真") // カレンダーに追加
-                                }
-                            }
-                            showPreview = false
-                            isCameraPresented = false
+                        messageText = "📤 写真を送信しました！"
+                        showMessage = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                            showMessage = false
                         }
-                        .padding()
-                        Button("撮り直し") {
-                            showPreview = false
-                        }
-                        .padding()
                     }
+                    showPhotoPreview = false
+                    previewFrontImage = nil
+                    previewBackImage = nil
+                },
+                onRetry: {
+                    isCameraPresented = true
+                    showPhotoPreview = false
                 }
-                .background(Color.black)
-            }
+            )
+        }
+        .alert(isPresented: $showBadgeConfirm) {
+            Alert(
+                title: Text("以下を\(badgeTargetFriend?.nickname ?? "")に送ります！"),
+                message: Text(badgeToSend?.name ?? ""),
+                primaryButton: .default(Text("送信")) {
+                    if let friend = badgeTargetFriend, let badge = badgeToSend {
+                        badgeManager.sendBadge(
+                            badge,
+                            to: friend.uuid,
+                            from: userUUID,
+                            friendManager: friendManager,
+                            multipeerManager: multipeerManager
+                        )
+                        showTemporaryMessage("バッジを送信しました！")
+                    }
+                    showBadgeConfirm = false
+                    showBadgePicker = false
+                },
+                secondaryButton: .cancel(Text("キャンセル")) {
+                    showBadgeConfirm = false
+                }
+            )
         }
         .overlay(
             Group {
@@ -432,6 +493,7 @@ struct ContentView: View {
             },
             alignment: .center
         )
+        .overlay(cameraPromptOverlay)
         .sheet(isPresented: $showBadgeReceivedSheet) {
             VStack(spacing: 20) {
                 Text("🎖️ バッジを受信しました！")
@@ -486,11 +548,68 @@ struct ContentView: View {
             }
             .padding()
         }
+        // .sheetでアルバム表示
         .sheet(isPresented: $friendManager.showFriendAlbum) {
             if let friend = friendManager.selectedFriendForAlbum {
-                // 修正後（senderUUID も渡す必要があるなら）
-                AlbumView(albumManager: albumManager, senderUUID: userUUID, )
-
+                AlbumView(albumManager: albumManager, senderUUID: friend.uuid, nickname: friend.nickname)
+            }
+        }
+        // ContentView.swift の sheetやNavigationLink呼び出し部分
+        .sheet(isPresented: $isAlbumPresented, onDismiss: {
+            selectedFriendForAlbum = nil
+        }) {
+            if let friend = selectedFriendForAlbum {
+                AlbumView(
+                    albumManager: albumManager,
+                    senderUUID: friend.uuid,
+                    nickname: friend.nickname
+                )
+            }
+            if isAlbumViewVisible, let friend = selectedFriendForAlbum {
+                Color.black.opacity(0.4)
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        withAnimation {
+                            isAlbumViewVisible = false
+                            selectedFriendForAlbum = nil
+                        }
+                    }
+                AlbumView(albumManager: albumManager, senderUUID: friend.uuid, nickname: friend.nickname,)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .zIndex(10)
+            }
+        }
+        .alert(isPresented: $showPhotoPrompt) {
+            Alert(
+                title: Text("「\(photoPromptFriend?.nickname ?? "")」と写真を撮ろう！"),
+                message: Text("写真を撮りますか？"),
+                primaryButton: .default(Text("撮る！")) {
+                    presentCamera(for: photoPromptFriend!)
+                },
+                secondaryButton: .cancel(Text("今はやめとく")) {
+                    if let friend = photoPromptFriend {
+                        presentBadgePicker(for: friend.uuid)
+                    }
+                }
+            )
+        }
+        .sheet(isPresented: $showBadgeReceivedPopup) {
+            VStack {
+                Text("\(badgeReceivedFrom ?? "")からバッジを受信しました！")
+                if let badge = badgeReceived {
+                    Text(badge.name)
+                    Text(badge.description)
+                }
+                HStack {
+                    Button("バッジを確認する") {
+                        // バッジ履歴画面へ遷移
+                        activeSheet = .badgeHistory
+                        showBadgeReceivedPopup = false
+                    }
+                    Button("今は見ない") {
+                        showBadgeReceivedPopup = false
+                    }
+                }
             }
         }
     }
@@ -504,15 +623,35 @@ struct ContentView: View {
         motionManager.accelerometerUpdateInterval = 0.2
         motionManager.startAccelerometerUpdates(to: OperationQueue.main) { data, error in
             guard let acceleration = data?.acceleration else { return }
-            if isShake(acceleration) {
-                handleShake()
+            if self.isShake(acceleration) {
+                self.motionManager.stopAccelerometerUpdates() // 🔥 まずシェイク後、いったん止める！
+
+                // ✅ シェイク検知 → 探索スタート
+                self.multipeerManager.startAdvertisingAndBrowsingForLimitedTime(seconds: 4)
+                self.handleShake()
+
+                // 🔥 そして一定時間後（例: 3秒後）にシェイク再開
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                    self.startShakeDetection()
+                    print("🔄 シェイク検知再開")
+                }
             }
         }
-
         showTemporaryMessage("🚀 シェイクの準備完了！")
     }
-
-
+    
+    var cameraPromptOverlay: some View {
+        Group {
+            if showCameraPrompt {
+                SlideInPromptView(text: "📸 \(cameraPromptFriendName)さんと撮影します！タップして開始", onTap: {
+                    if let friend = photoPromptFriend {
+                        presentCamera(for: friend)
+                        showCameraPrompt = false
+                    }
+                }, isVisible: $showCameraPrompt)
+            }
+        }
+    }
 
     func isShake(_ acceleration: CMAcceleration) -> Bool {
         let threshold = 2.5
@@ -521,72 +660,54 @@ struct ContentView: View {
                abs(acceleration.z) > threshold
     }
     
-    /// iPhoneを振ったときに呼ばれる処理
     func handleShake() {
-        guard !didShake else { return }
         didShake = true
+        print("🤝 シェイク検出")
 
-        let payload = OutgoingPayload(
-            uuid: userUUID,
-            profileURL: profileURL,
-            badges: selectedBadges
-        )
+        if let friendUUID = multipeerManager.lastReceivedID, multipeerManager.isConnected {
+            print("🛰️ 受信UUIDあり: \(friendUUID)")
+            if let friend = friendManager.friends.first(where: { $0.uuid == friendUUID }) {
+                photoPromptFriend = friend
+                cameraPromptFriendName = friend.nickname
+                withAnimation {
+                    showCameraPrompt = true
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                    withAnimation {
+                        showCameraPrompt = false
+                    }
+                }
 
-        if let data = try? JSONEncoder().encode(payload) {
-            multipeerManager.send(data: data)
-            print("🚀 バッジ送信: \(selectedBadges.map { $0.name })")
-            if !selectedBadges.isEmpty {
-                showTemporaryMessage("🎁 バッジ送信完了: \(selectedBadges.map { $0.name }.joined(separator: ", "))")
+            } else {
+                pendingUUID = friendUUID
+                pendingProfileURL = multipeerManager.receivedNickname
+                activeSheet = .nickname
             }
-        }
-        // 1. 自分のUUID送信はそのまま残す
-        if let data = userUUID.data(using: .utf8) {
-            multipeerManager.send(data: data)
-        }
-
-        // 2. 相手に送りたいバッジ情報（例：GentleManバッジ）を送信
-        let badge = Badge(id: UUID(), name: "GentleMan", description: "礼儀正しく、丁寧な印象", imageName: "GentleManBadge") // ← 自分で定義してるバッジ定数がある場合
-        let badgePayload = BadgePayload(type: .badge, from: userUUID, to: selectedBadgeTargetUUID ?? "", badge: badge)
-
-        if let badgeData = try? JSONEncoder().encode(badgePayload) {
-            multipeerManager.send(data: badgeData)
-        }
-
-        selectedBadges = [] // 送信後にリセット
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + Double(countdownDuration)) {
-            didShake = false
-        }
-        // 🔁 接続相手のUUIDを使ってバッジ送信対象に設定（selfは使わない！）
-        if let targetUUID = multipeerManager.lastReceivedID {
-            selectedBadgeTargetUUID = targetUUID
-            isCameraPresented = true  // ← Cameraここで起動
-            print("🎯 バッジ送信対象: \(targetUUID)")
         } else {
-            print("⚠️ 接続相手のUUIDが取得できませんでした")
-        }
-    }
-
-    func sendBadge(_ badge: Badge) {
-        guard !pendingUUID.isEmpty else { return }
-
-        let payload = BadgePayload(type: .badge, from: userUUID, to: pendingUUID, badge: badge)
-        if let data = try? JSONEncoder().encode(payload) {
-            multipeerManager.send(data: data)
-            friendManager.appendBadges(for: pendingUUID, newBadges: [badge])  // 自分側にも履歴残す
-            showTemporaryMessage("🎉 \(badge.name) を送りました！")
-            pendingUUID = ""
+            print("❗UUID未受信、または接続未確立")
+            showTemporaryMessage("近くに友達が見つかりませんでした。共有方法を選んでください！")
+            didShake = true
         }
     }
     
-    func handleReceivedBadge(from: String, badge: Badge) {
-        // 受信者側で保存
-        friendManager.appendBadges(for: from, newBadges: [badge])
-        showTemporaryMessage("🎖️ \(badge.name) バッジを \(from.prefix(6)) から受信しました！")
-        receivedBadges = [badge]
-        showBadgeReceivedSheet = true
+    // バッジ選択画面
+    func presentBadgePicker(for uuid: String) {
+        if let friend = friendManager.friends.first(where: { $0.uuid == uuid }) {
+            badgeTargetFriend = friend
+            showBadgePicker = true
+        }
     }
 
+    // バッジ送信
+    func sendBadge(to friend: Friend, badge: Badge, multipeerManager: MultipeerManager) {
+        badgeManager.sendBadge(
+            badge,
+            to: friend.uuid,
+            from: userUUID,
+            friendManager: friendManager,
+            multipeerManager: multipeerManager
+        )
+    }
 
     func showQRCode() {
         guard !profileURL.isEmpty else {
@@ -648,21 +769,36 @@ struct ContentView: View {
 
             Button("保存") {
                 if !pendingUUID.isEmpty {
-                    // 同じニックネームがすでに使われていないかチェック
+                    // ✅ 1. 入力が空だったら警告してリターン！
+                    if nicknameInput.trimmingCharacters(in: .whitespaces).isEmpty {
+                        showTemporaryMessage("⚠️ ニックネームを入力してください！")
+                        return
+                    }
+
+                    // ✅ 2. 重複チェック
                     if friendManager.friends.contains(where: { $0.nickname == nicknameInput }) {
                         showTemporaryMessage("⚠️ 同じニックネームがすでに存在します！")
                     } else {
-                        // 🔽 プロフィールURLも一緒に保存！
-                        friendManager.addFriend(uuid: pendingUUID, nickname: nicknameInput, profileURL: pendingProfileURL)
+                        // ✅ 3. 登録処理
+                        friendManager.registerFriend(
+                            uuid: pendingUUID,
+                            nickname: nicknameInput,
+                            profileURL: pendingProfileURL
+                        )
+
+                        let generator = UINotificationFeedbackGenerator()
+                        generator.notificationOccurred(.success)
+
                         showTemporaryMessage("🌟 \(nicknameInput) さんを登録しました！")
+
+                        // 後処理
                         nicknameInput = ""
                         pendingUUID = ""
-                        pendingProfileURL = nil // ← リセットを忘れずに
+                        pendingProfileURL = nil
                         activeSheet = nil
                     }
                 }
             }
-
 
             Button("キャンセル", role: .cancel) {
                 nicknameInput = ""
@@ -873,41 +1009,87 @@ struct ContentView: View {
         .background(Color.black.opacity(0.9))
         .edgesIgnoringSafeArea(.all)
     }
-    
-    func showCapturedImagePreview(image: UIImage) {
-        self.capturedImage = image
-        self.showPreview = true
-    }
-    
-    func sendCapturedPhoto(image: UIImage) {
-        guard let imageData = image.jpegData(compressionQuality: 0.8),
-              let targetUUID = multipeerManager.lastReceivedID else {
-            showTemporaryMessage("⚠️ 送信できる相手がいません")
-            showPreview = false
-            return
-        }
-        let photoPayload = PhotoPayload(
-            type: "photo",
-            from: userUUID,
-            to: targetUUID,
-            imageData: imageData,
-            message: "最高の思い出！"
-        )
-        if let encoded = try? JSONEncoder().encode(photoPayload) {
-            multipeerManager.send(data: encoded)
-            albumManager.addPhoto(image, from: userUUID, message: "自分の写真") // カレンダーに追加
-            showTemporaryMessage("📤 写真を送信しました！")
-        }
-        showPreview = false
-        capturedImage = nil
-    }
 
+    func openFriendAlbum(_ friend: Friend) {
+        self.selectedFriendForAlbum = friend
+        self.isAlbumPresented = true
+    }
+    
         
     func formatted(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy/MM/dd HH:mm"
         return formatter.string(from: date)
     }
+
+    func presentCamera(for friend: Friend) {
+        cameraTargetFriend = friend
+        isCameraPresented = true
+    }
+
+    func sendPhoto(front: UIImage, back: UIImage, to uuid: String, multipeerManager: MultipeerManager) {
+        cameraManager.sendPhoto(front: front, back: back, to: uuid, multipeerManager: multipeerManager)
+    }
+
+    // BadgePickerViewのonBadgeSelected
+    func confirmBadgeSend(badge: Badge, to friend: Friend) {
+        badgeToSend = badge
+        showBadgeConfirm = true
+    }
+
+    // 受信側
+    func handleBadgeReceived(from: String, badge: Badge) {
+        badgeReceivedFrom = from
+        badgeReceived = badge
+        showBadgeReceivedPopup = true
+    }
+    
+    struct SlideInPromptView: View {
+        let text: String
+        let onTap: () -> Void
+        @Binding var isVisible: Bool
+
+        @GestureState private var dragOffset = CGSize.zero
+
+        var body: some View {
+            VStack {
+                if isVisible {
+                    HStack {
+                        Text(text)
+                            .font(.body)
+                            .foregroundColor(.white)
+                            .padding()
+                        Spacer()
+                    }
+                    .background(Color.blue)
+                    .cornerRadius(10)
+                    .shadow(radius: 4)
+                    .padding()
+                    .onTapGesture {
+                        onTap()
+                    }
+                    .gesture(
+                        DragGesture()
+                            .updating($dragOffset) { value, state, _ in
+                                state = value.translation
+                            }
+                            .onEnded { value in
+                                if value.translation.height < -30 {  // 上にスワイプ
+                                    withAnimation {
+                                        isVisible = false
+                                    }
+                                }
+                            }
+                    )
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+
+                Spacer()
+            }
+            .animation(.easeInOut, value: isVisible)
+        }
+    }
+
 }
 
 // MARK: - AirDrop用のView

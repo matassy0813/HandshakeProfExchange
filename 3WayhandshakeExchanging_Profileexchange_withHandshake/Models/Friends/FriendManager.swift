@@ -49,23 +49,27 @@ class FriendManager: ObservableObject {
     func hasFriend(uuid: String) -> Bool {
         return friends.contains { $0.uuid == uuid }
     }
+    
+    func getFriend(by uuid: String) -> Friend? {
+        friends.first(where: { $0.uuid == uuid })
+    }
 
     // 4. 新しいフレンドを追加
-    /// 新しいフレンドを追加（プロフィールURLも保存）
-    func addFriend(uuid: String, nickname: String, profileURL: String?) {
-        guard !hasFriend(uuid: uuid) else { return }
-
-        if friends.contains(where: { $0.nickname == nickname }) {
-            print("⚠️ このニックネームはすでに使われています")
+    func registerFriend(uuid: String, nickname: String, profileURL: String?) {
+        guard !hasFriend(uuid: uuid) else {
+            print("⚠️ UUID既に存在")
             return
         }
-
-        let newFriend = Friend(id: UUID(), uuid: uuid, nickname: nickname, profileURL: profileURL, badges: pendingBadges)
-            friends.append(newFriend)
-            pendingBadges = [] // ✅ 登録後はクリア
-            saveFriends()
+        guard !isNicknameDuplicate(nickname) else {
+            print("⚠️ ニックネーム重複")
+            return
         }
-
+        let newFriend = Friend(id: UUID(), uuid: uuid, nickname: nickname, profileURL: profileURL, badges: [])
+        friends.append(newFriend)
+        pendingBadges = []
+        saveFriends()
+        print("✅ 新しい友達を登録: \(nickname)")
+    }
 
     // 5. ニックネーム取得
     func getNickname(for uuid: String) -> String? {
@@ -124,8 +128,6 @@ class FriendManager: ObservableObject {
             saveFriends()
         }
     }
-
-    // MARK: - 自分のバッジ取得
     // MARK: - 自分のバッジ取得
     func getMyBadges() -> [Badge] {
         // 一時的に "GentleMan" バッジを自分のバッジとして返す（実際にはユーザー設定に応じて管理する）
@@ -154,7 +156,14 @@ class FriendManager: ObservableObject {
     func getAllBadges() -> [Badge] {
         return friends.flatMap { $0.badges }
     }
+    
+    func openAlbum(for friend: Friend) {
+        selectedFriendForAlbum = friend
+        showFriendAlbum = true
+    }
 
-    
-    
+    func addPhotosToFriendAlbum(uuid: String, front: UIImage, back: UIImage, albumManager: AlbumManager) {
+        albumManager.addPhoto(front, from: uuid, message: "自撮り")
+        albumManager.addPhoto(back, from: uuid, message: "外カメ")
+    }
 }

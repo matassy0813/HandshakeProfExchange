@@ -13,51 +13,72 @@ struct AlbumCalendarView: View {
     @ObservedObject var albumManager: AlbumManager
     @State private var selectedDate: Date?
     @State private var showPhotosForDate = false
+    @State private var selectedPhoto: AlbumPhoto?
+    @State private var showDeleteConfirm = false
+    @Environment(\.dismiss) private var dismiss
+
 
     var body: some View {
         VStack {
+            Text("あなたの紡いだ思い出🎵")
+                    .font(.title2)
+                    .padding(.top, 16)
             // 日付リストを並べる（簡易カレンダー）
             let grouped = albumManager.photosGroupedByDate()
             ScrollView {
                 ForEach(grouped.keys.sorted(by: >), id: \.self) { date in
-                    if let photos = grouped[date], let firstImage = photos.first?.imageData,
-                       let uiImage = UIImage(data: firstImage) {
-                        VStack {
-                            Text(formatted(date))
-                                .font(.headline)
-                            Image(uiImage: uiImage)
-                                .resizable()
-                                .frame(width: 80, height: 80)
-                                .cornerRadius(8)
-                                .onTapGesture {
-                                    selectedDate = date
-                                    showPhotosForDate = true
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(formatted(date))
+                            .font(.headline)
+                            .padding(.leading)
+
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 80))], spacing: 12) {
+                            ForEach(grouped[date] ?? []) { photo in
+                                if let uiImage = UIImage(data: photo.imageData) {
+                                    Image(uiImage: uiImage)
+                                        .resizable()
+                                        .aspectRatio(contentMode: .fill)
+                                        .frame(width: 80, height: 80)
+                                        .clipped()
+                                        .cornerRadius(8)
+                                        .onTapGesture {
+                                            selectedPhoto = photo
+                                        }
                                 }
-                        }
-                    }
-                }
-            }
-        }
-        .sheet(isPresented: $showPhotosForDate) {
-            if let date = selectedDate,
-               let photos = albumManager.photosGroupedByDate()[date] {
-                ScrollView {
-                    VStack {
-                        ForEach(photos) { photo in
-                            if let image = UIImage(data: photo.imageData) {
-                                Image(uiImage: image)
-                                    .resizable()
-                                    .scaledToFit()
-                                    .padding()
-                                    .onTapGesture {
-                                        // 将来的に拡大表示
-                                    }
                             }
                         }
+                        .padding(.horizontal)
                     }
+                    .padding(.bottom, 16)
+                }
+            }
+
+        }
+        .fullScreenCover(item: $selectedPhoto) { photo in
+            VStack {
+                Image(uiImage: UIImage(data: photo.imageData)!)
+                    .resizable()
+                    .scaledToFit()
+                    .cornerRadius(10)
+                Button("閉じる") {
+                    selectedPhoto = nil
+                }
+                Button("削除") {
+                    showDeleteConfirm = true
+                }
+                .alert(isPresented: $showDeleteConfirm) {
+                    Alert(
+                        title: Text("削除してもよろしいですか？"),
+                        primaryButton: .destructive(Text("削除")) {
+                            albumManager.deletePhoto(photo)
+                            selectedPhoto = nil // ✅ 拡大ビューだけ閉じる
+                        },
+                        secondaryButton: .cancel()
+                    )
                 }
             }
         }
+
     }
 
     func formatted(_ date: Date) -> String {

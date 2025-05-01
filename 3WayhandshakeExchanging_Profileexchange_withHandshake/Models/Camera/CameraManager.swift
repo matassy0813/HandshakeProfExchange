@@ -12,11 +12,10 @@ class CameraManager: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
     let session = AVCaptureSession()
     private let output = AVCapturePhotoOutput()
     private var previewLayer: AVCaptureVideoPreviewLayer?
+    private var currentProcessor: AVCapturePhotoCaptureDelegate? = nil
     
-    private var currentCameraPosition: AVCaptureDevice.Position = .back
+    public var currentCameraPosition: AVCaptureDevice.Position = .back
     
-    @Published var photo: UIImage? = nil
-
     override init() {
         super.init()
         configureSession()
@@ -70,23 +69,9 @@ class CameraManager: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
     // MARK: - 写真撮影処理
     func capturePhoto(completion: @escaping (UIImage) -> Void) {
         let settings = AVCapturePhotoSettings()
-        output.capturePhoto(with: settings, delegate: PhotoCaptureProcessor(completion: completion))
-    }
-
-
-
-    // 撮影完了時に呼ばれる
-    func photoOutput(_ output: AVCapturePhotoOutput,
-                     didFinishProcessingPhoto photo: AVCapturePhoto,
-                     error: Error?) {
-        guard let data = photo.fileDataRepresentation(),
-              let image = UIImage(data: data) else {
-            print("⚠️ 写真の取得に失敗しました")
-            return
-        }
-        DispatchQueue.main.async {
-            self.photo = image
-        }
+        let processor = PhotoCaptureProcessor(completion: completion)
+        self.currentProcessor = processor
+        output.capturePhoto(with: settings, delegate: processor)
     }
     
     func toggleCamera() {
@@ -108,6 +93,43 @@ class CameraManager: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
 
         session.commitConfiguration()
     }
+        
+    /// カメラ切替（Position: .front or .back）
+    func switchCamera(to position: AVCaptureDevice.Position, completion: @escaping () -> Void) {
+        session.beginConfiguration()
+        // Remove old input
+        if let oldInput = session.inputs.first as? AVCaptureDeviceInput {
+            session.removeInput(oldInput)
+        }
+        // Add new input
+        if let newDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position),
+           let newInput = try? AVCaptureDeviceInput(device: newDevice),
+           session.canAddInput(newInput) {
+            session.addInput(newInput)
+            currentCameraPosition = position
+        }
+        session.commitConfiguration()
+        completion()
+    }
+
+    func sendPhoto(front: UIImage, back: UIImage, to uuid: String, multipeerManager: MultipeerManager) {
+        guard let userUUID = UserDefaults.standard.string(forKey: "userUUID") else { return }
+
+        let payload = PhotoPayload(
+            type: "photo",
+            from: userUUID,
+            to: uuid,
+            frontImage: front.jpegData(compressionQuality: 0.8)!,
+            backImage: back.jpegData(compressionQuality: 0.8)!,
+            message: "最高のメンツ！"
+        )
+
+        if let data = try? JSONEncoder().encode(payload) {
+            multipeerManager.send(data: data)
+        }
+    }
+
+
 }
 
 class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDelegate {

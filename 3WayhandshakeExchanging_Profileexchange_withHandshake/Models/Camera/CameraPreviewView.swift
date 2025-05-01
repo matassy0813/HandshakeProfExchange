@@ -8,6 +8,7 @@
 import SwiftUI
 import AVFoundation
 
+
 struct CameraPreviewView: UIViewRepresentable {
     let session: AVCaptureSession
 
@@ -16,8 +17,8 @@ struct CameraPreviewView: UIViewRepresentable {
 
         let previewLayer = AVCaptureVideoPreviewLayer(session: session)
         previewLayer.frame = UIScreen.main.bounds
-        previewLayer.videoGravity = AVLayerVideoGravity.resizeAspectFill
-
+        previewLayer.videoGravity = .resizeAspectFill
+        previewLayer.connection?.videoOrientation = .portrait  // ✅ これを追加！
 
         view.layer.addSublayer(previewLayer)
         return view
